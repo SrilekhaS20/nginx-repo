@@ -1,0 +1,15 @@
+{
+    "Comment": "A simple AWS Step Functions state machine that triggers a deployment",
+    "StartAt": "Deploy",
+    "States": {
+      "Deploy": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::codebuild:startBuild.sync",
+        "Parameters": {
+          "ProjectName": "nginx-build-project"
+        },
+        "End": true
+      }
+    }
+  }
+  

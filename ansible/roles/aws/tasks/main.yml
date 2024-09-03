@@ -1,0 +1,121 @@
+---
+- hosts: localhost
+  gather_facts: no
+  tasks:
+  
+    # Task: Install AWS CLI
+    - name: Install AWS CLI
+      apt:
+        name: awscli
+        state: present
+        update_cache: yes
+
+    # Task: Create IAM role for CodeCommit
+    - name: Create IAM role for CodeCommit
+      command: >
+        aws iam create-role --role-name CodeCommitServiceRole
+        --assume-role-policy-document file://templates/iam-codecommit-policy.json
+
+    - name: Attach policy to CodeCommit IAM role
+      command: aws iam attach-role-policy --role-name CodeCommitServiceRole --policy-arn arn:aws:iam::aws:policy/AWSCodeCommitFullAccess
+
+    # Task: Create IAM role for CodeBuild
+    - name: Create IAM role for CodeBuild
+      command: >
+        aws iam create-role --role-name CodeBuildServiceRole
+        --assume-role-policy-document file://templates/iam-codebuild-policy.json
+
+    - name: Attach policy to CodeBuild IAM role
+      command: aws iam attach-role-policy --role-name CodeBuildServiceRole --policy-arn arn:aws:iam::aws:policy/AWSCodeBuildDeveloperAccess
+
+    # Task: Create IAM role for CloudFormation
+    - name: Create IAM role for CloudFormation
+      command: >
+        aws iam create-role --role-name CloudFormationServiceRole
+        --assume-role-policy-document file://templates/iam-cloudformation-policy.json
+
+    - name: Attach policy to CloudFormation IAM role
+      command: aws iam attach-role-policy --role-name CloudFormationServiceRole --policy-arn arn:aws:iam::aws:policy/AWSCloudFormationFullAccess
+
+    # Task: Create IAM role for Step Functions
+    - name: Create IAM role for Step Functions
+      command: >
+        aws iam create-role --role-name StepFunctionsServiceRole
+        --assume-role-policy-document file://templates/iam-stepfunctions-policy.json
+
+    - name: Attach policy to Step Functions IAM role
+      command: aws iam attach-role-policy --role-name StepFunctionsServiceRole --policy-arn arn:aws:iam::aws:policy/AWSStepFunctionsFullAccess
+
+    # Task: Create CodeCommit repository
+    - name: Create CodeCommit repository
+      command: aws codecommit create-repository --repository-name nginx-repo --repository-description "Repository for Nginx code"
+
+    # Task: Create S3 bucket for CodeBuild artifacts
+    - name: Create S3 bucket
+      command: aws s3api create-bucket --bucket nginx-build-output --region us-east-1 --create-bucket-configuration LocationConstraint=us-east-1
+
+    # Task: Create CodeBuild project
+    - name: Create CodeBuild project
+      command: >
+        aws codebuild create-project --name nginx-build-project --source "type=CODECOMMIT,location=https://git-codecommit.us-east-1.amazonaws.com/v1/repos/nginx-repo"
+        --artifacts "type=S3,location=nginx-build-output"
+        --environment "type=LINUX_CONTAINER,image=aws/codebuild/standard:4.0,computeType=BUILD_GENERAL1_SMALL"
+        --service-role arn:aws:iam::{{ codebuild_role_arn }}
+        --region us-east-1
+
+    # Task: Enable CloudWatch logs for CodeBuild
+    - name: Enable CloudWatch logs for CodeBuild
+      command: aws logs create-log-group --log-group-name /aws/codebuild/nginx-build-project
+
+    # Task: Create CloudFormation stack with EC2 instance
+    - name: Create CloudFormation stack
+      command: >
+        aws cloudformation create-stack --stack-name nginx-ansible-stack
+        --template-body file://templates/cloudformation-template.yml
+        --parameters ParameterKey=KeyName,ParameterValue=my-key ParameterKey=InstanceType,ParameterValue=t2.micro
+        --capabilities CAPABILITY_NAMED_IAM
+
+    # Task: Wait for CloudFormation stack creation to complete
+    - name: Wait for CloudFormation stack creation to complete
+      command: >
+        aws cloudformation wait stack-create-complete --stack-name nginx-ansible-stack
+
+    # Task: Get the public IP of the EC2 instance
+    - name: Get EC2 instance IP
+      command: >
+        aws cloudformation describe-stacks --stack-name nginx-ansible-stack
+        --query "Stacks[0].Outputs[?OutputKey=='InstancePublicIP'].OutputValue" --output text
+      register: ec2_ip
+
+    - name: Set EC2 instance IP as a fact
+      set_fact:
+        ec2_ip: "{{ ec2_ip.stdout }}"
+
+- hosts: all
+  gather_facts: no
+  tasks:
+    # Task: Install Nginx on EC2 instance
+    - name: Install Nginx on EC2 instance
+      ansible.builtin.shell: |
+        ssh -o StrictHostKeyChecking=no -i "C:/EC2KeyPair/devops.pem" ubuntu@{{ ec2_ip }} 'sudo apt-get update && sudo apt-get install -y nginx'
+
+    # Task: Start and enable Nginx service on EC2 instance
+    - name: Start and enable Nginx service on EC2 instance
+      ansible.builtin.shell: |
+        ssh -o StrictHostKeyChecking=no -i "C:/EC2KeyPair/devops.pem" ubuntu@{{ ec2_ip }} 'sudo systemctl start nginx && sudo systemctl enable nginx'
+
+    # Task: Install Ansible on EC2 instance
+    - name: Install Ansible on EC2 instance
+      ansible.builtin.shell: |
+        ssh -o StrictHostKeyChecking=no -i "C:/EC2KeyPair/devops.pem" ubuntu@{{ ec2_ip }} 'sudo apt-get install -y ansible'
+
+    # Task: Create Step Function
+    - name: Create Step Function
+      command: >
+        aws stepfunctions create-state-machine --name nginx-deployment
+        --definition file://templates/stepfunctions-definition.json
+        --role-arn arn:aws:iam::{{ stepfunctions_role_arn }}
+
+    # Task: Start Step Function execution
+    - name: Start Step Function execution
+      command: aws stepfunctions start-execution --state-machine arn:aws:states:us-east-1:123456789012:stateMachine:nginx-deployment
